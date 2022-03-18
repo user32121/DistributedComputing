@@ -1,0 +1,10 @@
+server
+-handles clients and nodes
+
+client
+-login(source file to run) -> session id
+-submit task(input)
+
+node
+-login
+-receives a task + source file (hash to check if up to date)
