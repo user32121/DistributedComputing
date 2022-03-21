@@ -1,10 +1,64 @@
-server
--handles clients and nodes
+packet description
+4 byte size header (does not include size of header)
+4 byte type header + number of bytes following
+-HANDSHAKE + 3
+-COMMAND + 4
+-RESPONSE + 4
+-DATA + size-4
+rest of bytes are data according to type
 
-client
--login(source file to run) -> session id
--submit task(input)
+
 
 node
--login
--receives a task + source file (hash to check if up to date)
+-next task
+    +node sends COMMAND GETTASK
+    +server sends RESPONSE OK or RESPONSE NONEWTASKS
+        +if NONEWTASKS, wait and try again
+    +server sends uuid
+    +node checks if it has the uuid task
+    +node sends RESPONSE OK or RESPONSE DOESNOTHAVEFILE
+        +if DOESNOTHAVEFILE, server sends file
+    +go to next subtask
+
+-next subtask
+    +node sends COMMAND GETSUBTASK
+    +node sends uuid of file
+    +server sends RESPONSE OK or RESPONSE NONEWSUBTASKS
+        +if NONEWSUBTASKS, go back to request new task
+    +server sends uuid
+    +server sends input
+
+-submit subtask result
+    +node sends COMMAND SUBMITSUBTASKOUTPUT
+    +node sends uuid
+    +node sends output
+
+-ping
+    +server responds with pong
+    +this is mainly to maintain connection and prevent timeout
+
+
+
+client
+-connect
+    +upon connection
+    +client sends file
+    +go to submit subtask
+
+-submit subtask
+    +client sends COMMAND SUBMITSUBTASK
+    +server sends OK or NOTENOUGHSPACE
+        +if NOTENOUGHSPACE, wait and try again
+        +this is mainly to prevent server from having to store all subtasks at once
+    +client sends subtask input
+    +server sends subtask uuid
+
+-check if subtask done
+    +client sends COMMAND ISSUBTASKDONE
+    +server sends RESONSE OK or RESONSE NONEWRESULTS
+        +if NONEWRESULTS, wait and try again
+    +server sends subtask uuid
+    +server sends subtask output
+
+-also ping
+    +same as for node
