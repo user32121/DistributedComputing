@@ -28,11 +28,14 @@ COMMAND_SUBMITSUBTASKOUTPUT = 14
 RESPONSE_NODE = 83
 RESPONSE_CLIENT = 98
 RESPONSE_OK = 0
-RESPONSE_NONEWTASKS = 1
-RESPONSE_DOESNOTHAVEFILE = 2
-RESPONSE_NONEWSUBTASKS = 3
-RESPONSE_NOTENOUGHSPACE = 4
-RESPONSE_NONEWRESULTS = 5
+RESPONSE_DONE = 1
+RESPONSE_NONEWTASKS = 11
+RESPONSE_DOESNOTHAVEFILE = 12
+RESPONSE_NONEWSUBTASKS = 13
+RESPONSE_NOTENOUGHSPACE = 14
+RESPONSE_NONEWRESULTS = 15
+RESPONSE_SENDAUUID = 16
+RESPONSE_NOAUUID = 17
 
 
 
@@ -78,7 +81,7 @@ def send(connection:socket.socket, packetType:int, data:typing.Union[bytes, int]
 
 
 
-def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str]) -> typing.List[str]:
+def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str], AUUID:uuid.UUID=None):
     connection = socket.create_connection((addr, PORT))
     connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     print("connected to "+str(connection.getpeername())+" as "+str(connection.getsockname()))
@@ -99,10 +102,16 @@ def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str]) ->
     send(connection, TYPE_DATA, f.read().encode())
     f.close()
     print("file sent")
+    if(AUUID is not None):
+        print("sending AUUID "+str(AUUID))
+        send(connection, TYPE_RESPONSE, RESPONSE_SENDAUUID)
+        send(connection, TYPE_DATA, AUUID.bytes)
+        print("sent AUUID")
+    send(connection, TYPE_RESPONSE, RESPONSE_DONE)
 
     #send requests
     results : "dict[str, str]" = dict()
-    pendingSubtasks : "dict[bytes, str]" = dict()
+    pendingSubtasks : "dict[uuid.UUID, str]" = dict()
     nextSubtaskInput : str = None
     print("starting processing")
     while True:
@@ -139,6 +148,7 @@ def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str]) ->
                         print("submitted subtask "+str(subtaskUUID))
                 elif(response == RESPONSE_NOTENOUGHSPACE):
                     print("queue full")
+                    time.sleep(MAXTIMEOUT / 2)
                     break
                 else:
                     print("server sent unknown response to submit subtask")
@@ -163,9 +173,10 @@ def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str]) ->
                     else:
                         subtaskInput = pendingSubtasks.pop(subtaskUUID)
                         results[subtaskInput] = data.decode()
-                        print("finished subtask "+str(subtaskUUID))
+                        print("finished subtask "+str(subtaskUUID)+": "+subtaskInput+" -> "+results[subtaskInput])
             elif(response == RESPONSE_NONEWRESULTS):
                 print("no new results")
+                time.sleep(MAXTIMEOUT / 2)
                 break
             else:
                 print("server sent unknown response to is subtask done")
@@ -181,13 +192,24 @@ def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str]) ->
 
 
 
-# targetAddress = input("server ip address: ")
-targetAddress = "192.168.50.221"
-processor = "processor/process.py"
-inputData = ["1\n2","a\na","q\nw","4\n4","5\n5","6\n6","7\n7","8\n8","9\n9","10\n2"]
-# inputData = ["1\n2","a\na"]
+targetAddress = input("server ip address: ")
 
-outputData = runClient(targetAddress, processor, iter(inputData))
+if(False):
+    #temp processor
+    processor = "processor/process.py"
+    inputData = ["1\n2","a\na","q\nw","4\n4","5\n5","6\n6","7\n7","8\n8","9\n9","10\n2"]
+    # inputData = ["1\n2","a\na"]
+    AUUID = None
+else:
+    #nerdle
+    processor = "processor/nerdleSolver1DC.py"
+    f = open("processor/equations3.txt")
+    inputData = f.read()
+    f.close()
+    inputData = inputData.strip().split("\n")
+    AUUID = uuid.UUID('aa9df30a-eb04-42eb-9c2c-8059edcaa7ea')
+
+outputData = runClient(targetAddress, processor, iter(inputData), AUUID=AUUID)
 print(outputData)
 f = open("clientOutput.txt", "w")
 f.write(str(outputData))

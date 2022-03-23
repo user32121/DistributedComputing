@@ -7,6 +7,11 @@ packet description
 -DATA + size-4
 rest of bytes are data according to type
 
+uuids:
+AUUID: algorithm
+TUUID: task
+STUUID: subtask
+
 
 
 node
@@ -14,8 +19,9 @@ node
     +node sends COMMAND GETTASK
     +server sends RESPONSE OK or RESPONSE NONEWTASKS
         +if NONEWTASKS, wait and try again
-    +server sends uuid
-    +node checks if it has the uuid task
+    +server sends TUUID
+    +server sends AUUID
+    +node checks if it has the TUUID or AUUID file
     +node sends RESPONSE OK or RESPONSE DOESNOTHAVEFILE
         +if DOESNOTHAVEFILE, server sends file
     +go to next subtask
@@ -43,6 +49,8 @@ client
 -connect
     +upon connection
     +client sends file
+    +client sends RESPONSE DONE or RESPONSE SENDAUUID if applicable
+        +client sends AUUID
     +go to submit subtask
 
 -submit subtask

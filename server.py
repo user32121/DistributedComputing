@@ -38,11 +38,14 @@ COMMAND_SUBMITSUBTASKOUTPUT = 14
 RESPONSE_NODE = 83
 RESPONSE_CLIENT = 98
 RESPONSE_OK = 0
-RESPONSE_NONEWTASKS = 1
-RESPONSE_DOESNOTHAVEFILE = 2
-RESPONSE_NONEWSUBTASKS = 3
-RESPONSE_NOTENOUGHSPACE = 4
-RESPONSE_NONEWRESULTS = 5
+RESPONSE_DONE = 1
+RESPONSE_NONEWTASKS = 11
+RESPONSE_DOESNOTHAVEFILE = 12
+RESPONSE_NONEWSUBTASKS = 13
+RESPONSE_NOTENOUGHSPACE = 14
+RESPONSE_NONEWRESULTS = 15
+RESPONSE_SENDAUUID = 16  #algorithm uuid
+RESPONSE_NOAUUID = 17
 
 MAXSUBTASKS = 10  #max stored in server memory per client
 SERVERFOLDER = "serverFiles"
@@ -56,20 +59,23 @@ clients : "list[socket.socket]" = []
 nodes : "list[socket.socket]" = []
 isServerShuttingDown = False
 
-#dicts for clients
-processingQueues : "dict[socket._RetAddress, queue.Queue[typing.Tuple[uuid.UUID, bytes]]]" = dict()  #data stored as tuple (subtask uuid, input data)
-resultQueues : "dict[socket._RetAddress, queue.Queue[typing.Tuple[uuid.UUID, bytes]]]" = dict()
+#dicts for clients (subtask UUID)
+processingQueues : "dict[socket._RetAddress, queue.Queue[uuid.UUID]]" = dict()
+resultQueues : "dict[socket._RetAddress, queue.Queue[uuid.UUID]]" = dict()
 numTasksSubmitted : "dict[socket._RetAddress, int]" = dict()
 numTasksDone : "dict[socket._RetAddress, int]" = dict()
 
 #dicts for nodes
 nodeHasTask : "dict[socket._RetAddress, bool]" = dict()
-nodeSubTaskCount : "dict[socket._RetAddress, int]" = dict()
+nodeSubTasks : "dict[socket._RetAddress, list[uuid.UUID]]" = dict()
 
+#client UUID
 addrToUUID : "dict[socket._RetAddress, uuid.UUID]" = dict()
 UUIDToAddr : "dict[uuid.UUID, socket._RetAddress]" = dict()
+UUIDToAUUID : "dict[uuid.UUID, uuid.UUID]" = dict()
 
-UUIDToAddr : "dict[uuid.UUID, socket._RetAddress]" = dict()
+#subtask UUID
+UUIDToInOutData : "dict[uuid.UUID, typing.Tuple[bytes, bytes]]" = dict()
 
 #code by fatal error in https://stackoverflow.com/a/28950776
 def get_ip():
@@ -215,6 +221,25 @@ def handleClient(connection:socket.socket):
         file = open(os.path.join(clientFolder, str(clientUUID)+".py"), "w")
         file.write(dataAsStr)
         file.close()
+        addLineToDisplay(str(connectionAddr)+": received processor file")
+
+        UUIDToAUUID[clientUUID] = None
+
+        #check if more data to be sent
+        while True:
+            pType, data = receive(connection)
+            assert pType == TYPE_RESPONSE, "didn't receive response"
+            response = int.from_bytes(data, "big")
+            if(response == RESPONSE_DONE):
+                break
+            elif(response == RESPONSE_SENDAUUID):
+                pType, data = receive(connection)
+                assert pType == TYPE_DATA, "didn't receive data (AUUID)"
+                auuid = uuid.UUID(bytes=data)
+                addLineToDisplay(str(connectionAddr)+": received AUUID")
+                UUIDToAUUID[clientUUID] = auuid
+            else:
+                raise AssertionError("didn't receive RESPONSE_DONE")
     except GeneralSocketException:
         closeConnection(connection)
         return
@@ -224,8 +249,6 @@ def handleClient(connection:socket.socket):
 
     addrToUUID[connectionAddr] = clientUUID
     UUIDToAddr[clientUUID] = connectionAddr
-
-    addLineToDisplay(str(connectionAddr)+": received processor file")
     
     clients.append(connection)
     threading.current_thread().setName("Client-"+str(clientThreadNameCounter)); clientThreadNameCounter += 1
@@ -252,20 +275,22 @@ def handleClient(connection:socket.socket):
                     pType, data = receive(connection)
                     assert pType == TYPE_DATA, "didn't receive subtask data"
                     subtaskUUID = uuid.uuid4()
-                    processingQueues[connectionAddr].put((subtaskUUID, data))
+                    processingQueues[connectionAddr].put(subtaskUUID)
                     send(connection, TYPE_DATA, subtaskUUID.bytes)
                     numTasksSubmitted[connectionAddr] += 1
+                    UUIDToInOutData[subtaskUUID] = (data, None)
                     if(VERBOSE):
                         addLineToDisplay(str(connectionAddr)+": submitted a subtask")
             elif(command == COMMAND_ISSUBTASKDONE):
                 try:
-                    subtaskUUID, data = resultQueues[connectionAddr].get(block=False)
+                    subtaskUUID = resultQueues[connectionAddr].get(block=False)
                 except queue.Empty:
                     send(connection, TYPE_RESPONSE, RESPONSE_NONEWRESULTS)
                     continue
+                _, outputData = UUIDToInOutData.pop(subtaskUUID)
                 send(connection, TYPE_RESPONSE, RESPONSE_OK)
                 send(connection, TYPE_DATA, subtaskUUID.bytes)
-                send(connection, TYPE_DATA, data)
+                send(connection, TYPE_DATA, outputData)
             else:
                 addLineToDisplay(str(connectionAddr)+": received unkown command ("+command+")")
     except GeneralSocketException:
@@ -279,6 +304,7 @@ def handleClient(connection:socket.socket):
     numTasksDone.pop(connectionAddr)
     k = addrToUUID.pop(connectionAddr)
     UUIDToAddr.pop(k)
+    UUIDToAUUID.pop(clientUUID)
 
 processingQueueThreads : "dict[socket._RetAddress, typing.List[threading.Thread]]" = dict()  #stores the threads that are processing each queue
 #ensures that nodes are distributed evenly to tasks
@@ -326,7 +352,7 @@ def handleNode(connection:socket.socket):
     nodes.append(connection)
     threading.current_thread().setName("Node-"+str(nodeThreadNameCounter)); nodeThreadNameCounter += 1
     nodeHasTask[connectionAddr] = False
-    nodeSubTaskCount[connectionAddr] = 0
+    nodeSubTasks[connectionAddr] = []
 
     try:
         while not isServerShuttingDown:
@@ -344,12 +370,17 @@ def handleNode(connection:socket.socket):
                 if(addr == None):
                     send(connection, TYPE_RESPONSE, RESPONSE_NONEWTASKS)
                 else:
-                    taskUUID = addrToUUID[addr]
-                    taskUUIDAsBytes = taskUUID.bytes
+                    taskUUID = addrToUUID[addr]                    
+                    algoUUID = UUIDToAUUID[taskUUID]
 
                     #send data to node
                     send(connection, TYPE_RESPONSE, RESPONSE_OK)
-                    send(connection, TYPE_DATA, taskUUIDAsBytes)
+                    send(connection, TYPE_DATA, taskUUID.bytes)
+                    if(algoUUID is not None):
+                        send(connection, TYPE_RESPONSE, RESPONSE_SENDAUUID)
+                        send(connection, TYPE_DATA, algoUUID.bytes)
+                    else:
+                        send(connection, TYPE_RESPONSE, RESPONSE_NOAUUID)
 
                     pType, data = receive(connection)
                     assert pType == TYPE_RESPONSE, "didn't receive response (has file)"
@@ -378,7 +409,8 @@ def handleNode(connection:socket.socket):
                 try:
                     addr = UUIDToAddr[taskUUID]
                     q = processingQueues[addr]
-                    subtaskUUID, inputData = q.get(block=False)
+                    subtaskUUID = q.get(block=False)
+                    inputData, _ = UUIDToInOutData[subtaskUUID]
                     success = True
                 except (KeyError, queue.Empty) as e:
                     send(connection, TYPE_RESPONSE, RESPONSE_NONEWSUBTASKS)
@@ -390,7 +422,7 @@ def handleNode(connection:socket.socket):
                     UUIDToAddr[subtaskUUID] = addr
                     if(VERBOSE):
                         addLineToDisplay(str(connectionAddr)+": is starting subtask "+str(subtaskUUID))
-                    nodeSubTaskCount[connectionAddr] += 1
+                    nodeSubTasks[connectionAddr].append(subtaskUUID)
             elif(command == COMMAND_SUBMITSUBTASKOUTPUT):
                 pType, data = receive(connection)
                 assert pType == TYPE_DATA, "didn't receive data (task uuid)"
@@ -398,11 +430,12 @@ def handleNode(connection:socket.socket):
                 pType, data = receive(connection)
                 assert pType == TYPE_DATA, "didn't receive data (output)"
                 addr = UUIDToAddr.pop(subtaskUUID)
-                resultQueues[addr].put((subtaskUUID, data))
+                resultQueues[addr].put(subtaskUUID)
                 numTasksDone[addr] += 1
+                UUIDToInOutData[subtaskUUID] = (None, data)
                 if(VERBOSE):
                     addLineToDisplay(str(connectionAddr)+": finished subtask "+str(subtaskUUID))
-                nodeSubTaskCount[connectionAddr] -= 1
+                nodeSubTasks[connectionAddr].remove(subtaskUUID)
             else:
                 raise AssertionError("received unknown command ("+command+")")
     except GeneralSocketException:
@@ -411,7 +444,10 @@ def handleNode(connection:socket.socket):
         closeConnection(connection, e.args)
     nodes.remove(connection)
     nodeHasTask.pop(connectionAddr)
-    nodeSubTaskCount.pop(connectionAddr)
+    l = nodeSubTasks.pop(connectionAddr)
+    #add them back to processing queue
+    for subtaskUUID in l:
+        processingQueues[UUIDToAddr[subtaskUUID]].put(subtaskUUID)
 
 MAXMAXDISPLAYLINES = 10
 maxDisplayLines = 10
@@ -458,9 +494,13 @@ def updateDisplay():
         for s in nodes:
             try:
                 addr = s.getpeername()
+                nht = nodeHasTask[addr]
+                lnst = len(nodeSubTasks[addr])
             except OSError:
                 addr = "error"
-            lines.append("  {0:<25}  {1:>10}  {2:>10}".format(str(addr), nodeHasTask[addr], nodeSubTaskCount[addr]))
+                nht = "..."
+                lnst = "..."
+            lines.append("  {0:<25}  {1:>10}  {2:>10}".format(str(addr), nht, lnst))
     lines.append("")
     lines.append("clients:")
     if(len(clients) == 0):
