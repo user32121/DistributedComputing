@@ -1,7 +1,12 @@
+#TODO skip processing items that were already processed
+
+import os
 import socket
+import sys
 import typing
 import time
 import uuid
+import tqdm
 
 
 
@@ -37,6 +42,8 @@ RESPONSE_NONEWRESULTS = 15
 RESPONSE_SENDAUUID = 16
 RESPONSE_NOAUUID = 17
 
+CLIENTFOLDER = "clientFiles"
+
 
 
 class SocketIsClosedException(Exception):
@@ -62,7 +69,7 @@ def receive(connection:socket.socket) -> typing.Tuple[int, bytes]:
         data = _receiveBytes(connection, length)
         return (packetType, data)
     except SocketIsClosedException:
-        print(str(connection.getpeername())+": socket closed")
+        tqdm.tqdm.write(str(connection.getpeername())+": socket closed")
         return (TYPE_INVALID, 2)
 
 #returns False if failed
@@ -82,45 +89,52 @@ def send(connection:socket.socket, packetType:int, data:typing.Union[bytes, int]
 
 
 def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str], AUUID:uuid.UUID=None):
+    inputData = iter(tqdm.tqdm(inputData))
+
+    if(not os.path.isdir(CLIENTFOLDER)):
+        os.mkdir(CLIENTFOLDER)
+    clientTempOutput = open(os.path.join(CLIENTFOLDER, "clientTempOutput.txt"), "w")
+
     connection = socket.create_connection((addr, PORT))
     connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    print("connected to "+str(connection.getpeername())+" as "+str(connection.getsockname()))
+    tqdm.tqdm.write("connected to "+str(connection.getpeername())+" as "+str(connection.getsockname()))
     #handshake
     send(connection, TYPE_HANDSHAKE, HANDSHAKEBYTES)
-    print("sent handshake")
+    tqdm.tqdm.write("sent handshake")
     pType, data = receive(connection)
     assert pType == TYPE_RESPONSE, "server sent invalid response"
     assert int.from_bytes(data, "big") == RESPONSE_OK, "server did not send OK"
-    print("server ok")
+    tqdm.tqdm.write("server ok")
     #identify as client
     send(connection, TYPE_RESPONSE, RESPONSE_CLIENT)
-    print("identified as client")
+    tqdm.tqdm.write("identified as client")
 
     #send preliminary data
-    print("sending processor file")
+    tqdm.tqdm.write("sending processor file")
     f = open(processorFile, "r")
     send(connection, TYPE_DATA, f.read().encode())
     f.close()
-    print("file sent")
+    tqdm.tqdm.write("file sent")
     if(AUUID is not None):
-        print("sending AUUID "+str(AUUID))
+        tqdm.tqdm.write("sending AUUID "+str(AUUID))
         send(connection, TYPE_RESPONSE, RESPONSE_SENDAUUID)
         send(connection, TYPE_DATA, AUUID.bytes)
-        print("sent AUUID")
+        tqdm.tqdm.write("sent AUUID")
     send(connection, TYPE_RESPONSE, RESPONSE_DONE)
 
     #send requests
     results : "dict[str, str]" = dict()
     pendingSubtasks : "dict[uuid.UUID, str]" = dict()
     nextSubtaskInput : str = None
-    print("starting processing")
+    tqdm.tqdm.write("starting processing")
     while True:
         #ping
-        print("ping...", end="", flush=True)
+        tqdm.tqdm.write("ping...", end="")
+        # sys.stdout.flush()
         send(connection, TYPE_COMMAND, COMMAND_PING)
         pType, data = receive(connection)
-        if(pType != TYPE_COMMAND or int.from_bytes(data, "big") != COMMAND_PONG): print("server did not pong ("+str(pType)+": "+str(data)+")")
-        print("pong")
+        if(pType != TYPE_COMMAND or int.from_bytes(data, "big") != COMMAND_PONG): tqdm.tqdm.write("server did not pong ("+str(pType)+": "+str(data)+")")
+        tqdm.tqdm.write("pong")
 
         while True:
             #check if there are more subtasks to be submitted
@@ -131,61 +145,67 @@ def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str], AU
             
             #submit subtask
             if(nextSubtaskInput != None):
-                print("submitting subtask...", end="", flush=True)
+                tqdm.tqdm.write("submitting subtask...", end="")
+                # sys.stdout.flush()
                 send(connection, TYPE_COMMAND, COMMAND_SUBMITSUBTASK)
                 pType, data = receive(connection)
-                if(pType != TYPE_RESPONSE): print("server sent invalid response to submit subtask")
+                if(pType != TYPE_RESPONSE): tqdm.tqdm.write("server sent invalid response to submit subtask")
                 response = int.from_bytes(data, "big")
                 if(response == RESPONSE_OK):
                     send(connection, TYPE_DATA, nextSubtaskInput.encode())
                     pType, data = receive(connection)
                     if(pType != TYPE_DATA):
-                        print("server did not send uuid")
+                        tqdm.tqdm.write("server did not send uuid")
                     else:
                         subtaskUUID = uuid.UUID(bytes=data)
                         pendingSubtasks[subtaskUUID] = nextSubtaskInput
                         nextSubtaskInput = None
-                        print("submitted subtask "+str(subtaskUUID))
+                        tqdm.tqdm.write("submitted subtask "+str(subtaskUUID))
                 elif(response == RESPONSE_NOTENOUGHSPACE):
-                    print("queue full")
+                    tqdm.tqdm.write("queue full")
                     time.sleep(MAXTIMEOUT / 2)
                     break
                 else:
-                    print("server sent unknown response to submit subtask")
+                    tqdm.tqdm.write("server sent unknown response to submit subtask")
             time.sleep(0.5)
 
         #check if any subtasks done
         while True:
-            print("checking subtasks...", end="", flush=True)
+            tqdm.tqdm.write("checking subtasks...", end="")
+            # sys.stdout.flush()
             send(connection, TYPE_COMMAND, COMMAND_ISSUBTASKDONE)
             pType, data = receive(connection)
-            if(pType != TYPE_RESPONSE): print("server sent invalid response to is subtask done")
+            if(pType != TYPE_RESPONSE): tqdm.tqdm.write("server sent invalid response to is subtask done")
             response = int.from_bytes(data, "big")
             if(response == RESPONSE_OK):
                 pType, data = receive(connection)
                 if(pType != TYPE_DATA):
-                    print("server did not send uuid")
+                    tqdm.tqdm.write("server did not send uuid")
                 else:
                     subtaskUUID = uuid.UUID(bytes=data)
                     pType, data = receive(connection)
                     if(pType != TYPE_DATA):
-                        print("server did not send output")
+                        tqdm.tqdm.write("server did not send output")
                     else:
                         subtaskInput = pendingSubtasks.pop(subtaskUUID)
-                        results[subtaskInput] = data.decode()
-                        print("finished subtask "+str(subtaskUUID)+": "+subtaskInput+" -> "+results[subtaskInput])
+                        subtaskOutput = data.decode()
+                        results[subtaskInput] = subtaskOutput
+                        tqdm.tqdm.write("finished subtask "+str(subtaskUUID)+": "+subtaskInput+" -> "+results[subtaskInput])
+                        clientTempOutput.write(subtaskInput+" : "+subtaskOutput+"\n")
             elif(response == RESPONSE_NONEWRESULTS):
-                print("no new results")
+                tqdm.tqdm.write("no new results")
                 time.sleep(MAXTIMEOUT / 2)
                 break
             else:
-                print("server sent unknown response to is subtask done")
+                tqdm.tqdm.write("server sent unknown response to is subtask done")
             time.sleep(0.5)
 
         #check if done
         if(nextSubtaskInput == None and len(pendingSubtasks) == 0):
+            clientTempOutput.close()
+
             send(connection, TYPE_COMMAND, COMMAND_EXIT)
-            print("all subtasks finished")
+            tqdm.tqdm.write("all subtasks finished")
             return results
 
         time.sleep(1)
@@ -209,8 +229,8 @@ else:
     inputData = inputData.strip().split("\n")
     AUUID = uuid.UUID('aa9df30a-eb04-42eb-9c2c-8059edcaa7ea')
 
-outputData = runClient(targetAddress, processor, iter(inputData), AUUID=AUUID)
+outputData = runClient(targetAddress, processor, inputData, AUUID=AUUID)
 print(outputData)
-f = open("clientOutput.txt", "w")
+f = open(os.path.join(CLIENTFOLDER, "clientOutput.txt"), "w")
 f.write(str(outputData))
 f.close()
