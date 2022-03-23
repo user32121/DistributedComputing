@@ -430,9 +430,13 @@ def handleNode(connection:socket.socket):
                 pType, data = receive(connection)
                 assert pType == TYPE_DATA, "didn't receive data (output)"
                 addr = UUIDToAddr.pop(subtaskUUID)
-                resultQueues[addr].put(subtaskUUID)
-                numTasksDone[addr] += 1
-                UUIDToInOutData[subtaskUUID] = (None, data)
+                if(addr in resultQueues):
+                    resultQueues[addr].put(subtaskUUID)
+                    numTasksDone[addr] += 1
+                    UUIDToInOutData[subtaskUUID] = (None, data)
+                else:
+                    #client at addr disconnected
+                    addLineToDisplay(str(connectionAddr)+": WARNING: "+str(subtaskUUID)+" finished but client disconnected")
                 if(VERBOSE):
                     addLineToDisplay(str(connectionAddr)+": finished subtask "+str(subtaskUUID))
                 nodeSubTasks[connectionAddr].remove(subtaskUUID)
@@ -456,9 +460,9 @@ displayLines = []
 def addLineToDisplay(line):
     line = str(line)
     termSize = os.get_terminal_size()
-    while(len(line) > termSize.columns):
-        displayLines.append(line[0:termSize.columns])
-        line = line[termSize.columns:]
+    while(len(line) > termSize.columns-1):
+        displayLines.append(line[0:termSize.columns-1])
+        line = line[termSize.columns-1:]
     displayLines.append(line)
         
     while(len(displayLines) > maxDisplayLines):
@@ -475,14 +479,14 @@ def updateDisplay():
 
     termSize = os.get_terminal_size()
 
-    print(colorama.Cursor.POS(0, 0)+" "*termSize.columns)
+    print(colorama.Cursor.POS(0, 0)+" "*(termSize.columns-1))
     for i in range(maxDisplayLines):
         if(i < len(displayLines)):
-            print(displayLines[i].ljust(termSize.columns))
+            print(displayLines[i].ljust(termSize.columns-1))
         else:
-            print(" "*termSize.columns)
+            print(" "*(termSize.columns-1))
     lines : typing.List[str] = []
-    lines.append("-"*termSize.columns)
+    lines.append("-"*(termSize.columns-1))
     lines.append("server ip: "+str(serverIP))
     lines.append("active threads: {0:<5}    uptime: {1}".format(str(threading.active_count()), str(datetime.timedelta(seconds=time.time()-serverStartTime))))
     lines.append("")
@@ -523,7 +527,7 @@ def updateDisplay():
             lines.append("  {0:<25}  {1:>10}  {2:>10}  {3:>10}".format(str(addr), pqs, rqs, str(ntd)+"/"+str(nts)))
     
     for l in lines:
-        print(l.ljust(termSize.columns))
+        print(l.ljust(termSize.columns-1))
 
     #ensure new length of display doesn't exceed terminal size
     maxDisplayLines = min(termSize.lines - len(lines) - 2, MAXMAXDISPLAYLINES)
@@ -531,7 +535,7 @@ def updateDisplay():
     #clear extra space under
     j = termSize.lines - len(lines) - 2 - maxDisplayLines
     while(j > 0):
-        print(" "*termSize.columns)
+        print(" "*(termSize.columns-1))
         j -= 1
 
 

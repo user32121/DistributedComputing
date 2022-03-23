@@ -1,12 +1,10 @@
-#TODO skip processing items that were already processed
-
 import os
 import socket
-import sys
 import typing
 import time
 import uuid
 import tqdm
+import ast
 
 
 
@@ -88,12 +86,23 @@ def send(connection:socket.socket, packetType:int, data:typing.Union[bytes, int]
 
 
 
-def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str], AUUID:uuid.UUID=None):
-    inputData = iter(tqdm.tqdm(inputData))
+def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str], *, AUUID:uuid.UUID=None, checkpointFrequency=-1):
+    inputData = iter(tqdm.tqdm(inputData, smoothing=0.1))
 
     if(not os.path.isdir(CLIENTFOLDER)):
         os.mkdir(CLIENTFOLDER)
-    clientTempOutput = open(os.path.join(CLIENTFOLDER, "clientTempOutput.txt"), "w")
+
+    results : "dict[str, str]" = dict()
+
+    #load checkpoint
+    clientTempCheckpointPath = os.path.join(CLIENTFOLDER, "clientTempCheckpoint.txt")
+    if(os.path.isfile(clientTempCheckpointPath)):
+        tqdm.tqdm.write("loading results from clientTempCheckpoint.txt")
+        clientTempCheckpoint = open(clientTempCheckpointPath, "r")
+        prevCalculatedResults = clientTempCheckpoint.read()
+        clientTempCheckpoint.close()
+        results = ast.literal_eval(prevCalculatedResults)
+    lastCheckpointAt = len(results)
 
     connection = socket.create_connection((addr, PORT))
     connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -123,7 +132,6 @@ def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str], AU
     send(connection, TYPE_RESPONSE, RESPONSE_DONE)
 
     #send requests
-    results : "dict[str, str]" = dict()
     pendingSubtasks : "dict[uuid.UUID, str]" = dict()
     nextSubtaskInput : str = None
     tqdm.tqdm.write("starting processing")
@@ -140,6 +148,9 @@ def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str], AU
             #check if there are more subtasks to be submitted
             if(nextSubtaskInput == None):
                 nextSubtaskInput = next(inputData, None)
+                if(nextSubtaskInput in results):
+                    nextSubtaskInput = None
+                    continue
                 if(nextSubtaskInput == None):
                     break
             
@@ -191,7 +202,6 @@ def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str], AU
                         subtaskOutput = data.decode()
                         results[subtaskInput] = subtaskOutput
                         tqdm.tqdm.write("finished subtask "+str(subtaskUUID)+": "+subtaskInput+" -> "+results[subtaskInput])
-                        clientTempOutput.write(subtaskInput+" : "+subtaskOutput+"\n")
             elif(response == RESPONSE_NONEWRESULTS):
                 tqdm.tqdm.write("no new results")
                 time.sleep(MAXTIMEOUT / 2)
@@ -200,10 +210,18 @@ def runClient(addr: str, processorFile: str, inputData: typing.Iterable[str], AU
                 tqdm.tqdm.write("server sent unknown response to is subtask done")
             time.sleep(0.5)
 
+        #checkpoints
+        if(len(results) > lastCheckpointAt + checkpointFrequency):
+            tqdm.tqdm.write("writing checkpoint at "+str(len(results)))
+            clientTempCheckpoint = open(clientTempCheckpointPath, "w")
+            clientTempCheckpoint.write(str(results))
+            clientTempCheckpoint.close()
+            while(lastCheckpointAt <= len(results)):
+                lastCheckpointAt += checkpointFrequency
+            
+
         #check if done
         if(nextSubtaskInput == None and len(pendingSubtasks) == 0):
-            clientTempOutput.close()
-
             send(connection, TYPE_COMMAND, COMMAND_EXIT)
             tqdm.tqdm.write("all subtasks finished")
             return results
@@ -229,7 +247,7 @@ else:
     inputData = inputData.strip().split("\n")
     AUUID = uuid.UUID('aa9df30a-eb04-42eb-9c2c-8059edcaa7ea')
 
-outputData = runClient(targetAddress, processor, inputData, AUUID=AUUID)
+outputData = runClient(targetAddress, processor, inputData, AUUID=AUUID, checkpointFrequency=10)
 print(outputData)
 f = open(os.path.join(CLIENTFOLDER, "clientOutput.txt"), "w")
 f.write(str(outputData))
